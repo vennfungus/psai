@@ -1,0 +1,9 @@
+.venv/
+venv/
+env/
+
+# Raw datasets and generated preprocessing/embedding outputs
+data/
+
+__pycache__/
+*.py[cod]
