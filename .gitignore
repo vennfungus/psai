@@ -1,9 +1,7 @@
-.venv/
-venv/
-env/
-
 # Raw datasets and generated preprocessing/embedding outputs
 data/
+materials/
+.venv/
 
 __pycache__/
 *.py[cod]
