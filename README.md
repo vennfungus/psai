@@ -99,8 +99,8 @@ change this with `--min-native-text-chars`.
 
 ## Configuration
 
-The `PreprocessingConfig` dataclass centralizes paths, OCR language and
-resolution, native-text threshold, chunk size/overlap, tokenizer selection,
+The `PreprocessingConfig` dataclass centralises paths, OCR language and
+resolution, native-text threshold, chunk size/overlap, tokeniser selection,
 split ratios, grouping key, and output names. For example:
 
 ```python
@@ -121,11 +121,11 @@ config = PreprocessingConfig(
 )
 ```
 
-The default `regex` tokenizer is dependency-free and provides an approximate
+The default `regex` tokeniser is dependency-free and provides an approximate
 token count. A `tiktoken` encoding name may also be selected; when `tiktoken`
 or the requested encoding is unavailable, chunking falls back to the regex
-tokenizer and records the tokenizer actually used in its statistics. Install
-`tiktoken` separately if that tokenizer is needed.
+tokeniser and records the tokeniser actually used in its statistics. Install
+`tiktoken` separately if that tokeniser is needed.
 
 ## Outputs and traceability
 
@@ -139,7 +139,7 @@ The CLI writes UTF-8 files to the output directory:
   version.
 - `chunks.jsonl`: one object per chunk with deterministic `chunk_id`,
   `document_id`, `file_name`, `source_path`, one-based `page_number`, text,
-  token count, tokenizer, extraction method, OCR selection status, and optional
+  token count, tokeniser, extraction method, OCR selection status, and optional
   section heading. Pages are chunked independently so the page attribution is
   exact.
 - `errors.jsonl`: per-file extraction errors and per-document OCR errors.
@@ -199,7 +199,7 @@ Output files under the selected directory:
   if a run is interrupted during replacement, no current manifest is left
   suggesting the new outputs are a complete set.
 
-Vectors are L2-normalized by default so cosine similarity can be computed via
+Vectors are L2-normalised by default so cosine similarity can be computed via
 dot product. Use `--no-normalize` to retain raw model vectors. The model is
 inference-only; this module does not train or fine-tune it, and does not
 implement a vector database or retrieval.
@@ -210,7 +210,7 @@ implement a vector database or retrieval.
 fields and expected field types are optional arguments; unknown fields are
 preserved and malformed records are returned with line numbers.
 `find_file_duplicates` groups exact file matches by SHA-256.
-`find_text_duplicates` identifies normalized exact-text groups and can return
+`find_text_duplicates` identifies normalised exact-text groups and can return
 optional `SequenceMatcher` similarity candidates for manual review. No source
 or record is deleted automatically.
 
@@ -231,7 +231,7 @@ python -m unittest discover -s tests
 
 The tests generate small PDF fixtures locally. End-to-end OCR quality depends
 on an external Tesseract executable and installed language data; OCR logic is
-also unit-tested with a stubbed recognizer so those tests do not require the
+also unit-tested with a stubbed recogniser so those tests do not require the
 external engine.
 
 Embedding unit tests use a small mock model and do not download pretrained
@@ -247,7 +247,7 @@ weights.
 - Cleaning preserves paragraph boundaries and project details and only joins
   a conservative lowercase hyphenated line-break pattern. It does not repair
   arbitrary layout or table structure.
-- The default regex tokenizer is approximate; configure and install a
+- The default regex tokeniser is approximate; configure and install a
   `tiktoken` encoding for more model-specific token counts.
 - If OCR reports a missing executable, verify `tesseract --version` in the
   same terminal used to run Python. If it reports missing language data,
