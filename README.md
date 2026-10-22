@@ -246,8 +246,8 @@ python -c "from embedding.embedder import SentenceTransformerEmbedder; import js
 ```
 
 Pass that command's JSON output to the CLI's `--vector` argument. The Python
-API can also accept the resulting vector directly. This phase does not
-implement LLM generation, a web API, or a frontend.
+API can also accept the resulting vector directly. The semantic retrieval CLI
+below handles natural-language queries directly.
 
 Artifacts in `data/processed/chroma_db` are persistent local application data
 and are excluded from Git together with the rest of `data/`.
@@ -291,6 +291,90 @@ metadata. Chroma's cosine distance is converted to cosine similarity with
 Results retain Chroma's ranking order. The module does not generate answers;
 it returns traceable source chunks for a later application layer.
 
+## Grounded RAG question answering
+
+The standalone `rag` package uses the existing semantic `Retriever`, builds a
+bounded prompt from its ranked chunks, and sends that prompt to an
+OpenAI-compatible chat-completions API. It does not rebuild chunk embeddings.
+No provider was previously configured in this repository; the included
+adapter defaults to OpenAI's compatible endpoint and `gpt-4o-mini`. The
+endpoint and model can be configured for another compatible provider.
+
+Set the provider key in the environment (do not put it in source code or pass
+it as a command-line argument):
+
+```powershell
+$env:OPENAI_API_KEY = "your-provider-key"
+python -m rag.pipeline --question "What are the main tasks and dependencies in this project?" --top-k 5
+```
+
+Configure a different compatible service or model with environment variables
+or CLI options:
+
+```powershell
+$env:PSAI_LLM_BASE_URL = "https://api.example.com/v1"
+$env:PSAI_LLM_MODEL = "provider-model-name"
+python -m rag.pipeline --question "Summarise the project risks" --top-k 5
+```
+
+The CLI also supports `--model`, `--base-url`, `--api-key-env`,
+`--temperature`, `--max-output-tokens`, `--timeout`,
+`--context-budget-tokens`, and repeated `--filter` JSON objects. Metadata
+filters are validated by the existing Retrieval module against fields in the
+embedding metadata.
+
+The stable JSON response contains:
+
+- `answer`: generated response or a clear no-evidence limitation.
+- `sources`: only sources actually returned by Retrieval and included in the
+  prompt, with stable `[S1]` references and available chunk/document IDs,
+  filename, page, and section.
+- `retrieval_metadata`: collection, retrieved/included counts, approximate
+  prompt-token use, and IDs of shortened or omitted evidence.
+- `model_metadata`: provider type, model, temperature, and output-token limit.
+- `warnings`: prompt truncation/omission and unknown citation references.
+
+Example response shape (illustrative only; not an observed model answer):
+
+```json
+{
+  "answer": "The document says task A depends on task B [S1].",
+  "sources": [
+    {
+      "source_ref": "S1",
+      "chunk_id": "actual-retrieved-chunk-id",
+      "document_id": "actual-document-id",
+      "file_name": "project-plan.pdf",
+      "page_number": 4,
+      "section_heading": "Dependencies"
+    }
+  ],
+  "retrieval_metadata": {
+    "collection_name": "psai_chunks",
+    "top_k": 5,
+    "retrieved_count": 1,
+    "included_source_count": 1
+  },
+  "model_metadata": {
+    "provider": "openai-compatible",
+    "model": "gpt-4o-mini",
+    "temperature": 0.0,
+    "max_output_tokens": 1000
+  },
+  "warnings": []
+}
+```
+
+The prompt treats retrieved excerpts as untrusted evidence, asks the model to
+ignore instructions embedded in documents, report insufficient or conflicting
+evidence, and cite only supplied source references. Input token use is
+estimated conservatively from UTF-8 bytes rather than a provider-specific
+tokenizer. If evidence must be shortened or omitted to fit the configured
+budget, the response reports that behaviour. This is not a guarantee of
+factual correctness; check cited passages, especially where OCR or source
+documents may be inaccurate. This phase does not add conversation memory,
+LLM fine-tuning, or a frontend.
+
 ## Annotations, duplicates, quality, and dataset splits
 
 `load_annotations` accepts JSON arrays/objects and JSONL records. Required
@@ -329,6 +413,9 @@ locally generated vectors; they do not rebuild embeddings or download models.
 
 Retrieval tests use temporary ChromaDB collections and a mock query embedder;
 they do not download model weights.
+
+RAG tests mock both retrieval and the LLM API. No network access or paid
+provider calls are required by the normal test suite.
 
 ## Limitations and troubleshooting
 
