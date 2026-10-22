@@ -152,9 +152,13 @@ def chunk_document(
                 continue
             chunk_index = len(chunks) + 1
             document_id = str(document.get("document_id") or "")
+            source_identity = str(
+                document.get("source_path") or document.get("file_name") or ""
+            )
             page_number = page.get("page_number")
             chunk_id_source = (
-                f"{document_id}:{page_number}:{chunk_index}:{page_chunk}"
+                f"{document_id}:{source_identity}:{page_number}:"
+                f"{chunk_index}:{page_chunk}"
             )
             extraction_method = (
                 "ocr"

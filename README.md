@@ -252,6 +252,45 @@ implement LLM generation, a web API, or a frontend.
 Artifacts in `data/processed/chroma_db` are persistent local application data
 and are excluded from Git together with the rest of `data/`.
 
+## Semantic retrieval
+
+The `retrieval` package encodes a user query once with the same
+Sentence-Transformers model and normalization setting recorded in the embedding
+manifest, then queries the existing persistent ChromaDB collection. It does
+not regenerate document vectors. The default model and collection settings
+match the multilingual MiniLM embeddings; configure `--model` and
+`--collection` to match the collection being searched.
+
+After ingesting vectors into ChromaDB, run a query:
+
+```powershell
+python -m vector_db.pipeline --embeddings-dir data/processed/embeddings --persist-dir data/processed/chroma_db --collection psai_chunks ingest
+python -m retrieval.pipeline --query "What are the dependencies between project tasks?" --top-k 5
+```
+
+Filter on metadata present in the current chunk schema. For example, source
+filename and page number:
+
+```powershell
+python -m retrieval.pipeline --query "project risks" --top-k 5 --filter '{"file_name":"PSAI001.pdf"}' --filter '{"page_number":2}'
+```
+
+The current embedding metadata includes `chunk_id`, `document_id`, `file_name`,
+`source_path`, `page_number`, `text`, `extraction_method`, `ocr_used`,
+`section_heading`, `token_count`, `tokenizer`, `embedding_index`,
+`embedding_model`, `embedding_dimension`, and `text_sha256`. `text` is stored
+as the Chroma document; the remaining scalar metadata is available for
+filters. A filter on a field not represented in the existing metadata (for
+example, a project category or label) is rejected with the actual available
+field names.
+
+Each retrieval result contains rank, chunk/document IDs, text, distance,
+source filename, page number, section heading, and the complete Chroma
+metadata. Chroma's cosine distance is converted to cosine similarity with
+`similarity = 1 - distance`; other metrics are returned as distances only.
+Results retain Chroma's ranking order. The module does not generate answers;
+it returns traceable source chunks for a later application layer.
+
 ## Annotations, duplicates, quality, and dataset splits
 
 `load_annotations` accepts JSON arrays/objects and JSONL records. Required
@@ -287,6 +326,9 @@ weights.
 
 Vector database tests use temporary persistent ChromaDB directories and
 locally generated vectors; they do not rebuild embeddings or download models.
+
+Retrieval tests use temporary ChromaDB collections and a mock query embedder;
+they do not download model weights.
 
 ## Limitations and troubleshooting
 

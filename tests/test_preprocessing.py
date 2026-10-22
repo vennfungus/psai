@@ -167,6 +167,40 @@ class TextProcessingTests(unittest.TestCase):
             len(result["chunks"]),
         )
 
+    def test_identical_source_documents_receive_distinct_chunk_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "copy-a.pdf"
+            duplicate = root / "copy-b.pdf"
+            pdf = fitz.open()
+            pdf.new_page().insert_text(
+                (72, 72),
+                "Project plan task dependencies and milestones.",
+            )
+            pdf.save(original)
+            pdf.close()
+            duplicate.write_bytes(original.read_bytes())
+
+            config = PreprocessingConfig(
+                min_native_text_chars=1,
+                min_chunk_size=0,
+            )
+            first_document = extract_pdf_text(original, config)
+            second_document = extract_pdf_text(duplicate, config)
+            first_chunks = chunk_document(first_document, config)["chunks"]
+            second_chunks = chunk_document(second_document, config)["chunks"]
+
+            self.assertEqual(
+                first_document["document_id"],
+                second_document["document_id"],
+            )
+            self.assertTrue(first_chunks)
+            self.assertTrue(second_chunks)
+            self.assertNotEqual(
+                first_chunks[0]["chunk_id"],
+                second_chunks[0]["chunk_id"],
+            )
+
 
 class AnnotationAndDatasetTests(unittest.TestCase):
     def test_jsonl_reports_malformed_lines_and_preserves_unknown_fields(self) -> None:
