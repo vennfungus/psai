@@ -4,4 +4,3 @@ Pillow
 numpy
 sentence-transformers
 chromadb
-httpx

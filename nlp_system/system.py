@@ -1,21 +1,18 @@
-"""Single-turn retrieval-augmented answer generation."""
+"""Question processing with existing retrieval and local NLP."""
 
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Mapping, Protocol
 
 from retrieval.config import RetrievalConfig
 from retrieval.retriever import Retriever
 
-from .config import RAGConfig
-from .llm_client import LLMClient, OpenAICompatibleClient
-from .prompt_builder import PromptBuilder
+from .answerer import HybridAnswerer
+from .config import NLPConfig
 
 
-LOGGER = logging.getLogger("rag")
-_CITATION_PATTERN = re.compile(r"\[(S\d+)\]")
+LOGGER = logging.getLogger("nlp_system")
 
 
 class RetrievalClient(Protocol):
@@ -32,18 +29,17 @@ class RetrievalClient(Protocol):
     def close(self) -> None: ...
 
 
-class RAGGenerator:
-    """Retrieve evidence, build a bounded prompt, and generate a grounded answer."""
+class NLPSystem:
+    """Retrieve relevant chunks and return context-preserving evidence."""
 
     def __init__(
         self,
-        config: RAGConfig | None = None,
+        config: NLPConfig | None = None,
         *,
         retriever: RetrievalClient | None = None,
-        llm_client: LLMClient | None = None,
-        prompt_builder: PromptBuilder | None = None,
+        answerer: HybridAnswerer | None = None,
     ) -> None:
-        self.config = config or RAGConfig()
+        self.config = config or NLPConfig()
         retrieval_config = RetrievalConfig(
             embeddings_dir=self.config.embeddings_dir,
             persistence_directory=self.config.persistence_directory,
@@ -53,8 +49,7 @@ class RAGGenerator:
             top_k=self.config.top_k,
         )
         self._retriever = retriever or Retriever(retrieval_config)
-        self._llm_client = llm_client or OpenAICompatibleClient(self.config)
-        self._prompt_builder = prompt_builder or PromptBuilder()
+        self._answerer = answerer or HybridAnswerer()
 
     def answer(
         self,
@@ -82,82 +77,71 @@ class RAGGenerator:
             "collection_name": retrieval_result.get("collection_name"),
             "top_k": retrieval_result.get("top_k", result_limit),
             "retrieved_count": len(retrieved),
+            "dense_model": self.config.embedding_model,
+            "ranking": "dense semantic retrieval from ChromaDB",
         }
         if not retrieved:
             return {
                 "answer": (
-                    "I could not find relevant information in the retrieved "
-                    "PSAI documents, so I cannot answer this question from the "
-                    "available evidence."
+                    "Không tìm thấy đoạn tài liệu liên quan, nên chưa thể trả "
+                    "lời câu hỏi từ nguồn PSAI hiện có."
                 ),
                 "sources": [],
                 "retrieval_metadata": retrieval_metadata,
                 "model_metadata": self._model_metadata(),
-                "warnings": ["No relevant chunks were retrieved; the LLM was not called."],
+                "warnings": ["Không có chunk liên quan; không tạo câu trả lời."],
             }
 
-        prompt = self._prompt_builder.build(
+        extracted = self._answerer.build_answer(
             question,
             retrieved,
-            context_budget_tokens=self.config.context_budget_tokens,
-            max_output_tokens=self.config.max_output_tokens,
+            dense_weight=self.config.dense_weight,
+            lexical_weight=self.config.lexical_weight,
+            max_sentences=self.config.max_answer_sentences,
+            max_characters=self.config.max_answer_characters,
         )
-        if not prompt["sources"]:
+        if not extracted["answer"]:
             return {
                 "answer": (
-                    "The retrieved results did not contain usable text within "
-                    "the configured context budget, so I cannot answer from "
-                    "the available evidence."
+                    "Các đoạn được truy xuất không có câu văn bản dùng được, "
+                    "nên chưa thể trả lời từ bằng chứng hiện có."
                 ),
                 "sources": [],
                 "retrieval_metadata": retrieval_metadata,
                 "model_metadata": self._model_metadata(),
-                "warnings": prompt["warnings"],
+                "warnings": extracted["warnings"],
             }
-
-        answer_text = self._llm_client.generate(prompt["messages"])
-        if not isinstance(answer_text, str) or not answer_text.strip():
-            raise RuntimeError("LLM client returned an empty or invalid answer")
-        source_refs = {source["source_ref"] for source in prompt["sources"]}
-        cited_refs = set(_CITATION_PATTERN.findall(answer_text))
-        invalid_refs = sorted(cited_refs - source_refs)
-        warnings = list(prompt["warnings"])
-        if invalid_refs:
-            warnings.append(
-                "The model returned citation reference(s) not present in the "
-                f"supplied context: {', '.join(invalid_refs)}."
-            )
 
         retrieval_metadata.update(
             {
-                "included_source_count": len(prompt["sources"]),
-                "estimated_input_tokens": prompt["estimated_input_tokens"],
-                "available_input_tokens": prompt["available_input_tokens"],
-                "shortened_chunk_ids": prompt["shortened_chunk_ids"],
-                "omitted_chunk_ids": prompt["omitted_chunk_ids"],
+                "answer_method": "hybrid_extractive_nlp",
+                "dense_weight": self.config.dense_weight,
+                "lexical_weight": self.config.lexical_weight,
+                "candidate_sentence_count": extracted[
+                    "candidate_sentence_count"
+                ],
+                "selected_sentence_count": extracted[
+                    "selected_sentence_count"
+                ],
             }
         )
         return {
-            "answer": answer_text.strip(),
-            "sources": prompt["sources"],
+            "answer": extracted["answer"],
+            "sources": extracted["sources"],
             "retrieval_metadata": retrieval_metadata,
             "model_metadata": self._model_metadata(),
-            "warnings": warnings,
+            "warnings": extracted["warnings"],
         }
 
     def _model_metadata(self) -> dict[str, Any]:
         return {
-            "provider": "openai-compatible",
-            "model": self.config.model,
-            "temperature": self.config.temperature,
-            "max_output_tokens": self.config.max_output_tokens,
+            "answer_method": "classical_extractive_sentence_ranking",
+            "query_embedding_model": self.config.embedding_model,
+            "requires_llm_api": False,
         }
 
     def close(self) -> None:
-        """Release owned provider and retrieval resources when supported."""
-        close_llm = getattr(self._llm_client, "close", None)
-        if callable(close_llm):
-            close_llm()
+        """Release retrieval resources when supported."""
         close_retriever = getattr(self._retriever, "close", None)
         if callable(close_retriever):
             close_retriever()

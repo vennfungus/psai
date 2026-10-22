@@ -1,16 +1,15 @@
-"""Command-line interface for PSAI grounded question answering."""
+"""Command-line interface for PSAI's local NLP system."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
-from .config import RAGConfig
-from .generator import RAGGenerator
+from .config import NLPConfig
+from .system import NLPSystem
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,8 +22,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--filter",
         action="append",
         default=[],
-        metavar="JSON",
-        help="Metadata equality filter JSON; repeat to add AND conditions",
+        metavar="FILTER",
+        help=(
+            "Metadata filter as field=value (PowerShell-friendly) or a JSON "
+            "object; repeat to add AND conditions"
+        ),
     )
     parser.add_argument(
         "--embeddings-dir",
@@ -47,24 +49,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default="cpu",
     )
     parser.add_argument(
-        "--model",
-        default=os.environ.get("PSAI_LLM_MODEL", "gpt-4o-mini"),
-        help="Chat model; defaults to PSAI_LLM_MODEL or gpt-4o-mini",
+        "--max-answer-sentences",
+        type=int,
+        default=5,
+        help="Maximum number of evidence sentences in the answer",
     )
     parser.add_argument(
-        "--base-url",
-        default=os.environ.get("PSAI_LLM_BASE_URL", "https://api.openai.com/v1"),
-        help="OpenAI-compatible API base URL",
+        "--max-answer-characters",
+        type=int,
+        default=2500,
+        help="Maximum answer length in characters",
     )
-    parser.add_argument(
-        "--api-key-env",
-        default="OPENAI_API_KEY",
-        help="Environment variable containing the provider API key",
-    )
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--max-output-tokens", type=int, default=1000)
-    parser.add_argument("--timeout", type=float, default=60.0)
-    parser.add_argument("--context-budget-tokens", type=int, default=6000)
+    parser.add_argument("--dense-weight", type=float, default=0.65)
+    parser.add_argument("--lexical-weight", type=float, default=0.35)
     return parser
 
 
@@ -77,9 +74,25 @@ def _parse_filters(
         try:
             parsed = json.loads(raw_filter)
         except json.JSONDecodeError as exc:
-            parser.error(f"--filter must be a JSON object: {exc.msg}")
+            if "=" not in raw_filter:
+                parser.error(
+                    "--filter must be a JSON object or field=value; "
+                    f"could not parse JSON: {exc.msg}"
+                )
+            field, raw_value = raw_filter.split("=", maxsplit=1)
+            field = field.strip()
+            raw_value = raw_value.strip()
+            if not field or not raw_value:
+                parser.error("--filter field=value requires both values")
+            try:
+                parsed_value = json.loads(raw_value)
+            except json.JSONDecodeError:
+                parsed_value = raw_value
+            parsed = {field: parsed_value}
         if not isinstance(parsed, dict) or not parsed:
-            parser.error("--filter must be a non-empty JSON object")
+            parser.error(
+                "--filter must be a non-empty JSON object or field=value"
+            )
         duplicates = filters.keys() & parsed.keys()
         if duplicates:
             parser.error(
@@ -90,7 +103,7 @@ def _parse_filters(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one RAG query and print a source-attributed JSON response."""
+    """Run one question and print a source-attributed NLP response."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -99,29 +112,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.top_k < 1:
         parser.error("--top-k must be >= 1")
-    config = RAGConfig(
+    config = NLPConfig(
         embeddings_dir=args.embeddings_dir,
         persistence_directory=args.persist_dir,
         collection_name=args.collection,
         embedding_model=args.embedding_model,
         device=args.device,
         top_k=args.top_k,
-        context_budget_tokens=args.context_budget_tokens,
-        model=args.model,
-        base_url=args.base_url,
-        api_key_env=args.api_key_env,
-        temperature=args.temperature,
-        max_output_tokens=args.max_output_tokens,
-        timeout_seconds=args.timeout,
+        max_answer_sentences=args.max_answer_sentences,
+        max_answer_characters=args.max_answer_characters,
+        dense_weight=args.dense_weight,
+        lexical_weight=args.lexical_weight,
     )
-    generator = RAGGenerator(config)
+    nlp_system = NLPSystem(config)
     try:
-        response = generator.answer(
+        response = nlp_system.answer(
             args.question,
             filters=_parse_filters(parser, args.filter),
         )
     finally:
-        generator.close()
+        nlp_system.close()
     print(json.dumps(response, ensure_ascii=False, indent=2))
     return 0
 

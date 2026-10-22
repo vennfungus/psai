@@ -291,54 +291,60 @@ metadata. Chroma's cosine distance is converted to cosine similarity with
 Results retain Chroma's ranking order. The module does not generate answers;
 it returns traceable source chunks for a later application layer.
 
-## Grounded RAG question answering
+## Local NLP question processing
 
-The standalone `rag` package uses the existing semantic `Retriever`, builds a
-bounded prompt from its ranked chunks, and sends that prompt to an
-OpenAI-compatible chat-completions API. It does not rebuild chunk embeddings.
-No provider was previously configured in this repository; the included
-adapter defaults to OpenAI's compatible endpoint and `gpt-4o-mini`. The
-endpoint and model can be configured for another compatible provider.
+The standalone `nlp_system` package reuses the existing semantic `Retriever`;
+it does not rebuild chunk embeddings or call an LLM/API. It combines local
+Sentence-Transformers embeddings for finding relevant chunks with classical
+lexical (TF-IDF-like) scoring for ranking sentences. Before ranking, the NLP
+system joins PDF hard-wrapped lines, repairs words split by a line-ending
+hyphen, and preserves paragraph and list boundaries. This prevents fragments
+such as `This` / `task` / `revolves...` from being treated as separate answer
+sentences.
 
-Set the provider key in the environment (do not put it in source code or pass
-it as a command-line argument):
+This is a local extractive NLP system, not a generative LLM: it selects source
+text and cites it rather than composing new prose. It can use nearby text
+context to form complete sentences, but it cannot infer unstated facts or
+reliably decide which source is authoritative.
 
-```powershell
-$env:OPENAI_API_KEY = "your-provider-key"
-python -m rag.pipeline --question "What are the main tasks and dependencies in this project?" --top-k 5
-```
-
-Configure a different compatible service or model with environment variables
-or CLI options:
+Run a question after the ChromaDB collection has been ingested:
 
 ```powershell
-$env:PSAI_LLM_BASE_URL = "https://api.example.com/v1"
-$env:PSAI_LLM_MODEL = "provider-model-name"
-python -m rag.pipeline --question "Summarise the project risks" --top-k 5
+python -m nlp_system.pipeline --question "What are the main tasks and dependencies in this project?" --top-k 5
 ```
 
-The CLI also supports `--model`, `--base-url`, `--api-key-env`,
-`--temperature`, `--max-output-tokens`, `--timeout`,
-`--context-budget-tokens`, and repeated `--filter` JSON objects. Metadata
-filters are validated by the existing Retrieval module against fields in the
-embedding metadata.
+The answer uses a maximum of five evidence sentences and 2,500 characters by
+default. Tune the extraction and ranking settings from the CLI:
+
+```powershell
+python -m nlp_system.pipeline --question "Summarise the project risks" --top-k 5 --max-answer-sentences 3 --dense-weight 0.65 --lexical-weight 0.35
+```
+
+Other options include `--max-answer-characters`, `--embedding-model`,
+`--embeddings-dir`, `--persist-dir`, `--collection`, `--device`, and repeated
+`--filter` options. Use `field=value` syntax in PowerShell, for example
+`--filter file_name=PSAI128.pdf --filter page_number=13`; JSON object filters
+are also supported. Metadata filters are validated by the existing Retrieval
+module against fields in the embedding metadata. The dense and lexical
+weights must be non-negative and sum to 1.
 
 The stable JSON response contains:
 
-- `answer`: generated response or a clear no-evidence limitation.
-- `sources`: only sources actually returned by Retrieval and included in the
-  prompt, with stable `[S1]` references and available chunk/document IDs,
-  filename, page, and section.
-- `retrieval_metadata`: collection, retrieved/included counts, approximate
-  prompt-token use, and IDs of shortened or omitted evidence.
-- `model_metadata`: provider type, model, temperature, and output-token limit.
-- `warnings`: prompt truncation/omission and unknown citation references.
+- `answer`: verbatim extracted sentences with stable `[S1]` citations, or a
+  clear no-evidence limitation.
+- `sources`: only sources actually returned by Retrieval and used in the
+  answer, including available chunk/document IDs, filename, page, and section.
+- `retrieval_metadata`: collection, retrieval count, ranking method, extraction
+  weights, and sentence counts.
+- `model_metadata`: the local query embedding model and extractive answer
+  method; no answer-generation LLM is used.
+- `warnings`: limitations that affected sentence extraction.
 
-Example response shape (illustrative only; not an observed model answer):
+Example response shape (illustrative):
 
 ```json
 {
-  "answer": "The document says task A depends on task B [S1].",
+  "answer": "- Task A depends on task B. [S1]",
   "sources": [
     {
       "source_ref": "S1",
@@ -353,27 +359,24 @@ Example response shape (illustrative only; not an observed model answer):
     "collection_name": "psai_chunks",
     "top_k": 5,
     "retrieved_count": 1,
-    "included_source_count": 1
+    "answer_method": "hybrid_extractive_nlp",
+    "dense_weight": 0.65,
+    "lexical_weight": 0.35
   },
   "model_metadata": {
-    "provider": "openai-compatible",
-    "model": "gpt-4o-mini",
-    "temperature": 0.0,
-    "max_output_tokens": 1000
+    "answer_method": "classical_extractive_sentence_ranking",
+    "query_embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "requires_llm_api": false
   },
   "warnings": []
 }
 ```
 
-The prompt treats retrieved excerpts as untrusted evidence, asks the model to
-ignore instructions embedded in documents, report insufficient or conflicting
-evidence, and cite only supplied source references. Input token use is
-estimated conservatively from UTF-8 bytes rather than a provider-specific
-tokenizer. If evidence must be shortened or omitted to fit the configured
-budget, the response reports that behaviour. This is not a guarantee of
-factual correctness; check cited passages, especially where OCR or source
-documents may be inaccurate. This phase does not add conversation memory,
-LLM fine-tuning, or a frontend.
+Retrieved document content is quoted as evidence and never executed as
+instructions. Conflicting source sentences may both be returned; the extractive
+pipeline does not determine which source is authoritative. The output is not a
+guarantee of factual correctness; check cited passages, especially where OCR
+or source documents may be inaccurate. This phase does not add conversation memory, LLM fine-tuning, or a frontend.
 
 ## Annotations, duplicates, quality, and dataset splits
 
@@ -414,8 +417,9 @@ locally generated vectors; they do not rebuild embeddings or download models.
 Retrieval tests use temporary ChromaDB collections and a mock query embedder;
 they do not download model weights.
 
-RAG tests mock both retrieval and the LLM API. No network access or paid
-provider calls are required by the normal test suite.
+NLP system tests mock retrieval and exercise line-wrap normalisation and local
+sentence ranking. No LLM API, network access, or paid provider calls are
+required by the normal test suite.
 
 ## Limitations and troubleshooting
 
