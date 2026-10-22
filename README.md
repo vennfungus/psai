@@ -201,8 +201,56 @@ Output files under the selected directory:
 
 Vectors are L2-normalised by default so cosine similarity can be computed via
 dot product. Use `--no-normalize` to retain raw model vectors. The model is
-inference-only; this module does not train or fine-tune it, and does not
-implement a vector database or retrieval.
+inference-only; this module does not train or fine-tune it.
+
+## Persistent ChromaDB vector collection
+
+The standalone `vector_db` package stores the existing embedding artifacts in
+a persistent ChromaDB collection. It does not call the embedding model or
+rebuild vectors during ingestion. Install the added dependency and ingest:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m vector_db.pipeline --embeddings-dir data/processed/embeddings --persist-dir data/processed/chroma_db --collection psai_chunks ingest
+```
+
+The collection uses `cosine` for the normalised embeddings produced by default
+and `ip` (inner product) when the embedding manifest records unnormalised
+vectors with a dot-product similarity metric. Chroma's collection metadata
+stores the selected metric, model name, dimension, and normalisation setting.
+Use a new collection name when changing model, metric, normalisation, or
+embedding dimensions; incompatible configurations are rejected rather than
+silently mixed.
+
+Stable `chunk_id` values are used as Chroma IDs and upserted in configurable
+batches (default 256), so rerunning ingestion updates matching IDs rather than
+creating duplicates. Chunk text is stored as the Chroma document. All other
+JSON metadata is retained where possible: scalar values remain native
+metadata, `null` values are omitted because Chroma does not support them, and
+lists/objects are stored as compact JSON strings. The document ID, filename,
+source path, page number, section heading, embedding model and dimension
+therefore remain available for filtering and result attribution.
+
+Inspect a persisted collection:
+
+```powershell
+python -m vector_db.pipeline --persist-dir data/processed/chroma_db --collection psai_chunks inspect
+```
+
+Query it using a JSON embedding vector of the collection's dimension (384 for
+the current multilingual MiniLM model). Generate the query vector using the
+same model and normalisation setting as the stored chunks:
+
+```powershell
+python -c "from embedding.embedder import SentenceTransformerEmbedder; import json; model=SentenceTransformerEmbedder('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', 'cpu'); print(json.dumps(model.encode(['What are the project milestones?'], batch_size=1, normalize_embeddings=True)[0].tolist()))"
+```
+
+Pass that command's JSON output to the CLI's `--vector` argument. The Python
+API can also accept the resulting vector directly. This phase does not
+implement LLM generation, a web API, or a frontend.
+
+Artifacts in `data/processed/chroma_db` are persistent local application data
+and are excluded from Git together with the rest of `data/`.
 
 ## Annotations, duplicates, quality, and dataset splits
 
@@ -236,6 +284,9 @@ external engine.
 
 Embedding unit tests use a small mock model and do not download pretrained
 weights.
+
+Vector database tests use temporary persistent ChromaDB directories and
+locally generated vectors; they do not rebuild embeddings or download models.
 
 ## Limitations and troubleshooting
 
