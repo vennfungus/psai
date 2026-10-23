@@ -198,9 +198,16 @@ class HybridAnswerer:
                 break
 
         source_refs: list[dict[str, Any]] = []
+        selected_evidence: list[dict[str, str]] = []
         seen_source_refs: set[str] = set()
         for candidate in selected:
             source_ref = candidate["source_ref"]
+            selected_evidence.append(
+                {
+                    "source_ref": source_ref,
+                    "text": candidate["sentence"],
+                }
+            )
             if source_ref in seen_source_refs:
                 continue
             seen_source_refs.add(source_ref)
@@ -253,6 +260,7 @@ class HybridAnswerer:
         return {
             "answer": "\n".join(answer_lines),
             "sources": source_refs,
+            "evidence": selected_evidence,
             "selected_sentence_count": len(selected),
             "candidate_sentence_count": total_candidates,
             "warnings": warnings,

@@ -5,10 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Sequence
+from unittest.mock import patch
 
 import numpy as np
 
 from embedding.config import EmbeddingConfig
+from embedding.embedder import SentenceTransformerEmbedder
 from embedding.pipeline import run_embedding_pipeline
 
 
@@ -42,6 +44,17 @@ class MockEmbedder:
 
 
 class EmbeddingPipelineTests(unittest.TestCase):
+    def test_model_loading_is_local_only(self) -> None:
+        with patch("sentence_transformers.SentenceTransformer") as model_class:
+            model = SentenceTransformerEmbedder("local-model")
+
+        model_class.assert_called_once_with(
+            "local-model",
+            device="cpu",
+            local_files_only=True,
+        )
+        self.assertEqual(model.device, "cpu")
+
     def test_jsonl_errors_empty_text_and_metadata_alignment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

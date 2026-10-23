@@ -8,8 +8,12 @@ from typing import Any, Mapping, Protocol
 from retrieval.config import RetrievalConfig
 from retrieval.retriever import Retriever
 
+from generation.local_transformer import LocalTransformerGenerator
+from project_management import ProjectPlan, schedule_plan, validate_plan
+
 from .answerer import HybridAnswerer
 from .config import NLPConfig
+from .extractors import extract_project_facts
 
 
 LOGGER = logging.getLogger("nlp_system")
@@ -38,6 +42,7 @@ class NLPSystem:
         *,
         retriever: RetrievalClient | None = None,
         answerer: HybridAnswerer | None = None,
+        generator: LocalTransformerGenerator | None = None,
     ) -> None:
         self.config = config or NLPConfig()
         retrieval_config = RetrievalConfig(
@@ -50,6 +55,7 @@ class NLPSystem:
         )
         self._retriever = retriever or Retriever(retrieval_config)
         self._answerer = answerer or HybridAnswerer()
+        self._generator = generator
 
     def answer(
         self,
@@ -57,6 +63,9 @@ class NLPSystem:
         *,
         top_k: int | None = None,
         filters: Mapping[str, Any] | None = None,
+        generate: bool = False,
+        planning: bool = False,
+        extract_facts: bool = False,
     ) -> dict[str, Any]:
         """Answer a question and preserve the real retrieved source references."""
         if not isinstance(question, str) or not question.strip():
@@ -77,6 +86,11 @@ class NLPSystem:
             "collection_name": retrieval_result.get("collection_name"),
             "top_k": retrieval_result.get("top_k", result_limit),
             "retrieved_count": len(retrieved),
+            "retrieved_chunk_ids": [
+                result.get("chunk_id")
+                for result in retrieved
+                if result.get("chunk_id") is not None
+            ],
             "dense_model": self.config.embedding_model,
             "ranking": "dense semantic retrieval from ChromaDB",
         }
@@ -125,12 +139,97 @@ class NLPSystem:
                 ],
             }
         )
-        return {
+        response: dict[str, Any] = {
             "answer": extracted["answer"],
             "sources": extracted["sources"],
             "retrieval_metadata": retrieval_metadata,
             "model_metadata": self._model_metadata(),
-            "warnings": extracted["warnings"],
+            "warnings": list(extracted["warnings"]),
+        }
+        if extract_facts or planning:
+            response["extracted_facts"] = extract_project_facts(
+                extracted.get("evidence", [])
+            )
+        if generate or planning:
+            if self._generator is None:
+                raise RuntimeError(
+                    "Local text generation was requested but no local model "
+                    "was configured. Set --local-model-path to a pre-provisioned "
+                    "model directory. No model will be downloaded automatically."
+                )
+            generated = self._generator.generate(
+                question,
+                extracted.get("evidence", []),
+                response_format="json" if planning else "text",
+                task="wbs" if planning else "qa",
+            )
+            response["answer"] = generated["answer"]
+            response["model_metadata"] = generated["model_metadata"]
+            response["warnings"].extend(generated["warnings"])
+            if planning:
+                structured = generated.get("structured_output")
+                required_fields = {
+                    "start_date",
+                    "tasks",
+                    "requirements",
+                    "constraints",
+                    "deliverables",
+                    "milestones",
+                    "unresolved",
+                }
+                if not isinstance(structured, dict) or not required_fields <= set(
+                    structured
+                ):
+                    raise RuntimeError(
+                        "Generated WBS is missing required schema fields: "
+                        + ", ".join(
+                            sorted(
+                                required_fields
+                                - set(structured if isinstance(structured, dict) else {})
+                            )
+                        )
+                    )
+                if not isinstance(structured["unresolved"], list) or not all(
+                    isinstance(item, str) for item in structured["unresolved"]
+                ):
+                    raise RuntimeError(
+                        "Generated WBS unresolved field must be a list of strings"
+                    )
+                try:
+                    plan = ProjectPlan.from_dict(structured)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"Generated WBS does not match the project plan schema: {exc}"
+                    ) from exc
+                plan_issues = validate_plan(plan)
+                valid_source_refs = {
+                    source["source_ref"] for source in extracted["sources"]
+                }
+                for item_type, items in (
+                    ("task", plan.tasks),
+                    ("requirement", plan.requirements),
+                    ("constraint", plan.constraints),
+                    ("deliverable", plan.deliverables),
+                    ("milestone", plan.milestones),
+                ):
+                    for item in items:
+                        unknown_refs = sorted(
+                            set(item.source_refs) - valid_source_refs
+                        )
+                        if not item.source_refs:
+                            response["warnings"].append(
+                                f"Generated {item_type} has no source references."
+                            )
+                        if unknown_refs:
+                            response["warnings"].append(
+                                f"Generated {item_type} cites unknown source(s): "
+                                + ", ".join(unknown_refs)
+                            )
+                response["project_plan"] = structured
+                response["plan_validation"] = plan_issues
+                response["schedule"] = schedule_plan(plan)
+        return {
+            **response,
         }
 
     def _model_metadata(self) -> dict[str, Any]:

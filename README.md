@@ -36,6 +36,13 @@ psai/
 │   ├── ocr.py
 │   ├── pipeline.py
 │   └── split_dataset.py
+├── embedding/
+├── vector_db/
+├── retrieval/
+├── nlp_system/
+├── generation/             # Optional, offline-only local causal Transformer
+├── project_management/     # Deterministic plan validation and scheduling
+├── evaluation/             # Labelled retrieval/evidence metrics
 ├── tests/
 └── requirements.txt
 ```
@@ -156,27 +163,30 @@ indicator, not a guarantee of correctness.
 
 ## Generate local embeddings
 
-Install the dependencies (the first `sentence-transformers` run downloads the
-selected model if it is not already cached):
+Install the dependencies and explicitly provision the selected embedding
+model. Embedding and retrieval load weights from local files only; they do
+not download models automatically:
 
 ```powershell
 python -m pip install -r requirements.txt
+python -m pip install -U huggingface_hub
+hf download sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 --local-dir models\multilingual-embedding
 python -m preprocessing.pipeline --input-dir data/raw --output-dir data/processed --no-ocr
-python -m embedding.pipeline --input data/processed/chunks.jsonl --output-dir data/processed/embeddings
+python -m embedding.pipeline --input data/processed/chunks.jsonl --output-dir data/processed/embeddings --model models\multilingual-embedding
 ```
 
 The default `sentence-transformers/all-MiniLM-L6-v2` is a compact local model
 for English text. It does not provide reliable Vietnamese or general
 multilingual support. For Vietnamese and multilingual text, select
 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`; model quality
-can vary by language and domain. Model weights are downloaded from the model
-hub on first use unless a local model directory is supplied. No API key is
+can vary by language and domain. Provision weights explicitly with the
+`hf download` command and pass the local model directory. No API key is
 required. CPU is the default, so GPU availability is not assumed.
 
 Example options:
 
 ```powershell
-python -m embedding.pipeline --input data/processed/chunks.jsonl --output-dir data/processed/embeddings --model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 --batch-size 16 --device cpu
+python -m embedding.pipeline --input data/processed/chunks.jsonl --output-dir data/processed/embeddings --model models\multilingual-embedding --batch-size 16 --device cpu
 ```
 
 The input is one chunk JSON object per line; current preprocessing records
@@ -187,6 +197,10 @@ metadata row, including `text`, and adds `embedding_index`, `embedding_model`,
 `embedding_dimension`, and a text SHA-256 digest. Invalid JSON or records
 without string text are reported as failures; empty text is reported as
 skipped. The manifest includes counts and per-record failure/skip reasons.
+Embedding calls the pretrained model in inference mode; it does not train or
+fine-tune a language model. The optional `split_records` helper is not called
+by preprocessing or embedding, and one proposal PDF does not need a
+train/validation/test split to be indexed.
 
 Output files under the selected directory:
 
@@ -265,14 +279,14 @@ After ingesting vectors into ChromaDB, run a query:
 
 ```powershell
 python -m vector_db.pipeline --embeddings-dir data/processed/embeddings --persist-dir data/processed/chroma_db --collection psai_chunks ingest
-python -m retrieval.pipeline --query "What are the dependencies between project tasks?" --top-k 5
+python -m retrieval.pipeline --query "What are the dependencies between project tasks?" --top-k 5 --model models\multilingual-embedding
 ```
 
 Filter on metadata present in the current chunk schema. For example, source
 filename and page number:
 
 ```powershell
-python -m retrieval.pipeline --query "project risks" --top-k 5 --filter '{"file_name":"PSAI001.pdf"}' --filter '{"page_number":2}'
+python -m retrieval.pipeline --query "project risks" --top-k 5 --model models\multilingual-embedding --filter '{"file_name":"PSAI001.pdf"}' --filter '{"page_number":2}'
 ```
 
 The current embedding metadata includes `chunk_id`, `document_id`, `file_name`,
@@ -297,27 +311,35 @@ The standalone `nlp_system` package reuses the existing semantic `Retriever`;
 it does not rebuild chunk embeddings or call an LLM/API. It combines local
 Sentence-Transformers embeddings for finding relevant chunks with classical
 lexical (TF-IDF-like) scoring for ranking sentences. Before ranking, the NLP
-system joins PDF hard-wrapped lines, repairs words split by a line-ending
-hyphen, and preserves paragraph and list boundaries. This prevents fragments
-such as `This` / `task` / `revolves...` from being treated as separate answer
-sentences.
+system normalises PDF hard-wrapped lines, repairs words split by a line-ending
+hyphen, and keeps paragraphs, task headings and list boundaries. It selects
+complete source sentences and preserves provenance; it does not create new
+facts.
 
-This is a local extractive NLP system, not a generative LLM: it selects source
-text and cites it rather than composing new prose. It can use nearby text
-context to form complete sentences, but it cannot infer unstated facts or
-reliably decide which source is authoritative.
+Rule-based extraction recognises selected task headings, dates, durations,
+costs, dependencies and requirement/constraint/risk/assumption language in
+English and Vietnamese. Each extracted fact retains its evidence passage and
+source fields. These patterns are intentionally conservative; unrecognised or
+ambiguous facts remain unknown and require review.
 
-Run a question after the ChromaDB collection has been ingested:
+Run a question after the ChromaDB collection has been ingested. The proposal
+PDF currently in this repository can be processed and indexed separately from
+the multi-document research corpus:
 
 ```powershell
-python -m nlp_system.pipeline --question "What are the main tasks and dependencies in this project?" --top-k 5
+python -m preprocessing.pipeline --input-dir materials\DSP-Proposal_resumit.pdf --output-dir data\proposal_processed --no-ocr
+python -m embedding.pipeline --input data\proposal_processed\chunks.jsonl --output-dir data\proposal_embeddings --model models\multilingual-embedding
+python -m vector_db.pipeline --embeddings-dir data\proposal_embeddings --persist-dir data\proposal_chroma_db --collection psai_proposal ingest
+python -m nlp_system.pipeline --question "What are the main tasks and dependencies in this project?" --top-k 5 --embeddings-dir data\proposal_embeddings --persist-dir data\proposal_chroma_db --collection psai_proposal --embedding-model models\multilingual-embedding
 ```
 
-The answer uses a maximum of five evidence sentences and 2,500 characters by
-default. Tune the extraction and ranking settings from the CLI:
+The commands use dedicated output directories and do not overwrite the
+existing all-document corpus. The Word file in `materials` is not an input to
+the PDF preprocessing pipeline. The answer uses at most five evidence
+sentences and 2,500 characters by default. Tune ranking with:
 
 ```powershell
-python -m nlp_system.pipeline --question "Summarise the project risks" --top-k 5 --max-answer-sentences 3 --dense-weight 0.65 --lexical-weight 0.35
+python -m nlp_system.pipeline --question "Summarise the project risks" --top-k 5 --embedding-model models\multilingual-embedding --max-answer-sentences 3 --dense-weight 0.65 --lexical-weight 0.35
 ```
 
 Other options include `--max-answer-characters`, `--embedding-model`,
@@ -339,6 +361,8 @@ The stable JSON response contains:
 - `model_metadata`: the local query embedding model and extractive answer
   method; no answer-generation LLM is used.
 - `warnings`: limitations that affected sentence extraction.
+- `extracted_facts`: returned when `--extract-facts` is supplied; absent fields
+  are marked `unknown_requires_review`.
 
 Example response shape (illustrative):
 
@@ -377,6 +401,87 @@ instructions. Conflicting source sentences may both be returned; the extractive
 pipeline does not determine which source is authoritative. The output is not a
 guarantee of factual correctness; check cited passages, especially where OCR
 or source documents may be inaccurate. This phase does not add conversation memory, LLM fine-tuning, or a frontend.
+
+## Optional local Transformer generation
+
+`generation/` is an optional, strictly local Hugging Face Transformers adapter.
+It loads a causal instruction model only when `--generate` or `--planning` is
+used, requires a local model directory, passes `local_files_only=True`, and
+does not fall back to a hosted provider. No generator weights are included or
+cached in the inspected environment. The default query-answer path remains
+extractive and needs no generative model.
+
+Provision model weights as a separate, deliberate operation (this is the only
+step below that needs model-hub access). Choose a model compatible with your
+hardware, the model licence, and Vietnamese/English requirements:
+
+```powershell
+python -m pip install -U huggingface_hub
+hf download <publisher>/<causal-instruct-model> --local-dir models\<model-folder>
+```
+
+Then run inference from the local folder:
+
+```powershell
+python -m nlp_system.pipeline --question "Explain the project dependencies." --top-k 5 --generate --local-model-path models\<model-folder> --generation-device cpu --context-length 4096 --max-new-tokens 256
+python -m nlp_system.pipeline --question "Propose a project WBS from the proposal." --top-k 10 --planning --local-model-path models\<model-folder> --generation-device cpu --context-length 4096 --max-new-tokens 700
+```
+
+Add `--embedding-model models\multilingual-embedding` to these commands when
+the indexed corpus was embedded with that local directory.
+
+The adapter rejects evidence that exceeds the configured/model context rather
+than silently truncating it. CPU inference can be slow and memory use depends
+on the selected model and context length. `--quantization dynamic-int8` is an
+optional CPU-only PyTorch dynamic quantisation path; it is not enabled by
+default and its speed/quality impact has not been benchmarked here. CUDA and
+MPS generation can be selected when the installed PyTorch build supports them.
+Missing weights, memory/runtime failures, invalid JSON and unsupported
+citations are surfaced; citation checks verify reference IDs, not whether a
+claim is semantically entailed by a passage.
+
+For a fully offline run, provision the embedding and generator models in
+advance and set the Hugging Face offline flags in the shell as well. Embedding,
+retrieval and generation load only local model files:
+
+```powershell
+$env:HF_HUB_OFFLINE = "1"
+$env:TRANSFORMERS_OFFLINE = "1"
+```
+
+## Project-plan validation and scheduling
+
+When `--planning` is used, the local model proposes JSON requirements,
+deliverables, milestones and tasks with evidence references. Python validates
+unique IDs, dependency/parent references, cycles, dates and durations, then
+schedules in deterministic topological order using **calendar days**. Unknown
+duration, project start date or dependency information is reported as
+unresolved; no values are invented to complete the schedule. Deadline
+violations are reported rather than adjusted. Review the proposal and
+validation output before using a generated plan.
+
+## Evaluation
+
+Create a UTF-8 JSONL file with labelled questions and relevant chunk IDs:
+
+```json
+{"question":"What depends on task T-11?","relevant_chunk_ids":["<labelled-chunk-id>"],"expected_fact_types":["dependency"]}
+```
+
+Run retrieval, evidence coverage, citation and rule-extraction metrics against
+the configured collection:
+
+```powershell
+python -m evaluation.pipeline --dataset data\evaluation.jsonl --top-k 5 --embeddings-dir data\proposal_embeddings --persist-dir data\proposal_chroma_db --collection psai_proposal
+```
+
+The report includes Precision@k, Recall@k, evidence coverage, citation-ID
+validity and fact-type precision/recall. Add `--generate` with
+`--local-model-path models\<model-folder>`, or use `--planning` with the same
+local model path, to measure generation latency, tokens per second and plan
+violations. These are computed from actual runs; no performance result is
+asserted here. Use a manually reviewed labelled set before drawing quality
+conclusions.
 
 ## Annotations, duplicates, quality, and dataset splits
 
@@ -417,9 +522,15 @@ locally generated vectors; they do not rebuild embeddings or download models.
 Retrieval tests use temporary ChromaDB collections and a mock query embedder;
 they do not download model weights.
 
-NLP system tests mock retrieval and exercise line-wrap normalisation and local
-sentence ranking. No LLM API, network access, or paid provider calls are
-required by the normal test suite.
+NLP system, extraction, planning, generation and evaluation tests use local
+fixtures and mocked model/runtime interfaces. No generative model download,
+network access, or paid provider call is required by the normal test suite.
+An optional integration test uses an already provisioned local model:
+
+```powershell
+$env:PSAI_LOCAL_MODEL_PATH = "models\<model-folder>"
+python -m unittest tests.test_local_model_integration -v
+```
 
 ## Limitations and troubleshooting
 

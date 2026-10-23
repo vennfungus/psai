@@ -3,4 +3,5 @@ pytesseract
 Pillow
 numpy
 sentence-transformers
+transformers
 chromadb

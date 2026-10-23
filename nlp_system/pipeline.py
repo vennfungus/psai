@@ -8,6 +8,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from generation import LocalGenerationConfig, LocalTransformerGenerator
+
 from .config import NLPConfig
 from .system import NLPSystem
 
@@ -62,6 +64,39 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dense-weight", type=float, default=0.65)
     parser.add_argument("--lexical-weight", type=float, default=0.35)
+    parser.add_argument(
+        "--extract-facts",
+        action="store_true",
+        help="Include rule-extracted project facts with source evidence",
+    )
+    parser.add_argument(
+        "--generate",
+        action="store_true",
+        help="Use a pre-provisioned local Transformer to compose an answer",
+    )
+    parser.add_argument(
+        "--planning",
+        action="store_true",
+        help="Generate a JSON WBS and validate/schedule it with Python",
+    )
+    parser.add_argument(
+        "--local-model-path",
+        type=Path,
+        help="Path to an already downloaded local causal language model",
+    )
+    parser.add_argument(
+        "--generation-device",
+        choices=("cpu", "cuda", "mps"),
+        default="cpu",
+    )
+    parser.add_argument("--context-length", type=int, default=4096)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--quantization",
+        choices=("none", "dynamic-int8"),
+        default="none",
+    )
     return parser
 
 
@@ -112,6 +147,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.top_k < 1:
         parser.error("--top-k must be >= 1")
+    if args.planning and not args.local_model_path:
+        parser.error("--planning requires --local-model-path")
+    if args.generate and not args.local_model_path:
+        parser.error("--generate requires --local-model-path")
+    if args.local_model_path and not (args.generate or args.planning):
+        parser.error(
+            "--local-model-path requires --generate or --planning"
+        )
     config = NLPConfig(
         embeddings_dir=args.embeddings_dir,
         persistence_directory=args.persist_dir,
@@ -124,11 +167,26 @@ def main(argv: list[str] | None = None) -> int:
         dense_weight=args.dense_weight,
         lexical_weight=args.lexical_weight,
     )
-    nlp_system = NLPSystem(config)
+    generator = None
+    if args.local_model_path:
+        generator = LocalTransformerGenerator(
+            LocalGenerationConfig(
+                model_path=args.local_model_path,
+                device=args.generation_device,
+                context_length=args.context_length,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                quantization=args.quantization,
+            )
+        )
+    nlp_system = NLPSystem(config, generator=generator)
     try:
         response = nlp_system.answer(
             args.question,
             filters=_parse_filters(parser, args.filter),
+            generate=args.generate,
+            planning=args.planning,
+            extract_facts=args.extract_facts,
         )
     finally:
         nlp_system.close()

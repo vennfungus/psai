@@ -34,11 +34,16 @@ class SentenceTransformerEmbedder:
                 resolved_device = "cpu"
 
         try:
-            self._model = SentenceTransformer(model_name, device=resolved_device)
+            self._model = SentenceTransformer(
+                model_name,
+                device=resolved_device,
+                local_files_only=True,
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Could not load embedding model {model_name!r} on "
-                f"{resolved_device!r}: {exc}"
+                f"{resolved_device!r} from local files only. Provision the "
+                f"model before running the pipeline: {exc}"
             ) from exc
         self.model_name = model_name
         self.device = resolved_device

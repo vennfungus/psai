@@ -1,8 +1,11 @@
 """Offline tests for the local hybrid NLP system."""
 
+import json
 import unittest
+from pathlib import Path
 from typing import Any, Mapping
 
+from generation import LocalGenerationConfig, LocalTransformerGenerator
 from nlp_system.answerer import HybridAnswerer
 from nlp_system.config import NLPConfig
 from nlp_system.pipeline import _build_parser, _parse_filters
@@ -63,6 +66,27 @@ def _retrieved_result(
             "section_heading": "Dependencies",
         },
     }
+
+
+class MockTextRuntime:
+    context_length = 4096
+
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.last_prompt: str | None = None
+
+    def count_tokens(self, text: str) -> int:
+        return 20
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        max_new_tokens: int,
+        temperature: float,
+    ) -> str:
+        self.last_prompt = prompt
+        return self.response
 
 
 class HybridAnswererTests(unittest.TestCase):
@@ -212,6 +236,81 @@ class NLPSystemTests(unittest.TestCase):
         ).answer("Summarise the project")
         self.assertIn("chưa thể trả lời", response["answer"])
         self.assertEqual(response["sources"], [])
+
+    def test_rule_extraction_is_exposed_with_source_evidence(self) -> None:
+        response = NLPSystem(
+            NLPConfig(),
+            retriever=MockRetriever(
+                [
+                    _retrieved_result(
+                        text="Task T-12 - Build prototype. Task T-12 depends on Task T-11."
+                    )
+                ]
+            ),
+        ).answer("What depends on task T-11?", extract_facts=True)
+        extracted = response["extracted_facts"]
+        dependency = next(
+            fact for fact in extracted["facts"] if fact["type"] == "dependency"
+        )
+        self.assertEqual(dependency["value"]["task"], "T-12")
+        self.assertEqual(dependency["source"]["source_ref"], "S1")
+
+    def test_generation_uses_mocked_local_runtime_and_preserves_sources(self) -> None:
+        runtime = MockTextRuntime("Task T-1 is required [S1].")
+        generator = LocalTransformerGenerator(
+            LocalGenerationConfig(Path("mock-model"), max_new_tokens=32),
+            runtime=runtime,
+        )
+        response = NLPSystem(
+            NLPConfig(),
+            retriever=MockRetriever([_retrieved_result()]),
+            generator=generator,
+        ).answer("What is the dependency?", generate=True)
+        self.assertEqual(response["answer"], "Task T-1 is required [S1].")
+        self.assertEqual(response["sources"][0]["source_ref"], "S1")
+        self.assertEqual(
+            response["model_metadata"]["runtime"],
+            "transformers_local",
+        )
+
+    def test_planning_validates_model_json_and_reports_missing_data(self) -> None:
+        plan = {
+            "start_date": None,
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "title": "Build prototype",
+                    "duration_days": None,
+                    "dependencies": None,
+                    "parent_task_id": None,
+                    "earliest_start": None,
+                    "deadline": None,
+                    "source_refs": ["S1"],
+                }
+            ],
+            "requirements": [],
+            "constraints": [],
+            "deliverables": [],
+            "milestones": [],
+            "unresolved": ["Duration and project start date are not in evidence."],
+        }
+        runtime = MockTextRuntime(json.dumps(plan))
+        generator = LocalTransformerGenerator(
+            LocalGenerationConfig(Path("mock-model"), max_new_tokens=128),
+            runtime=runtime,
+        )
+        response = NLPSystem(
+            NLPConfig(),
+            retriever=MockRetriever([_retrieved_result("chunk-a", "Task T1.")]),
+            generator=generator,
+        ).answer("Create a WBS", planning=True)
+        validation_codes = {
+            issue["code"] for issue in response["plan_validation"]
+        }
+        self.assertIn("missing_duration", validation_codes)
+        self.assertIn("unknown_dependencies", validation_codes)
+        self.assertEqual(response["schedule"]["schedule"], [])
+        self.assertTrue(response["schedule"]["unresolved"])
 
     def test_conflicting_evidence_is_cited_without_claiming_resolution(self) -> None:
         results = [
