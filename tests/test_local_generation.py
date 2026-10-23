@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from generation import LocalGenerationConfig, LocalTransformerGenerator
+from llm import GenerationOptions, GenerationResult
 
 
 class MockRuntime:
@@ -20,12 +21,10 @@ class MockRuntime:
     def generate(
         self,
         prompt: str,
-        *,
-        max_new_tokens: int,
-        temperature: float,
-    ) -> str:
+        options: GenerationOptions | None = None,
+    ) -> GenerationResult:
         self.last_prompt = prompt
-        return self.response
+        return GenerationResult(self.response, {})
 
 
 class LocalGenerationTests(unittest.TestCase):

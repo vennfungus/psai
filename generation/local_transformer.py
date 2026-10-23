@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 import time
 from typing import Any, Protocol, Sequence
 
 from .config import LocalGenerationConfig
+from llm import (
+    GenerationOptions,
+    GenerationResult,
+    LocalTransformerClient,
+    LocalTransformerConfig,
+    LocalGenerationError,
+)
 
 
 class TextRuntime(Protocol):
@@ -17,89 +23,12 @@ class TextRuntime(Protocol):
     def count_tokens(self, text: str) -> int:
         ...
 
-    def generate(self, prompt: str, *, max_new_tokens: int, temperature: float) -> str:
-        ...
-
-
-class _TransformersRuntime:
-    def __init__(
+    def generate(
         self,
-        model_path: Path,
-        device: str,
-        quantization: str,
-    ) -> None:
-        try:
-            import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-        except ImportError as exc:
-            raise RuntimeError(
-                "Local generation requires transformers and PyTorch. Install "
-                "the project requirements before provisioning a model."
-            ) from exc
-        if not model_path.exists() or not model_path.is_dir():
-            raise FileNotFoundError(
-                f"Local generative model directory does not exist: {model_path}"
-            )
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                str(model_path),
-                local_files_only=True,
-                trust_remote_code=False,
-            )
-            self.model = AutoModelForCausalLM.from_pretrained(
-                str(model_path),
-                local_files_only=True,
-                trust_remote_code=False,
-            )
-            self.model.to(device)
-            self.model.eval()
-            model_config = self.model.config
-            self.context_length = next(
-                (
-                    value
-                    for value in (
-                        getattr(model_config, "max_position_embeddings", None),
-                        getattr(model_config, "n_positions", None),
-                        getattr(model_config, "max_sequence_length", None),
-                    )
-                    if isinstance(value, int) and value > 0
-                ),
-                None,
-            )
-            if quantization == "dynamic-int8":
-                self.model = torch.ao.quantization.quantize_dynamic(
-                    self.model,
-                    {torch.nn.Linear},
-                    dtype=torch.qint8,
-                )
-            self.device = device
-            self.torch = torch
-            if self.tokenizer.eos_token_id is None:
-                raise RuntimeError(
-                    "The local model tokenizer must define an end-of-sequence token"
-                )
-        except Exception as exc:
-            raise RuntimeError(
-                f"Could not load local Transformer model at {model_path}: {exc}"
-            ) from exc
-
-    def generate(self, prompt: str, *, max_new_tokens: int, temperature: float) -> str:
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        inputs = {key: value.to(self.device) for key, value in inputs.items()}
-        generation_options: dict[str, Any] = {
-            "max_new_tokens": max_new_tokens,
-            "do_sample": temperature > 0,
-            "pad_token_id": self.tokenizer.eos_token_id,
-        }
-        if temperature > 0:
-            generation_options["temperature"] = temperature
-        with self.torch.inference_mode():
-            output = self.model.generate(**inputs, **generation_options)
-        generated = output[0, inputs["input_ids"].shape[1] :]
-        return self.tokenizer.decode(generated, skip_special_tokens=True).strip()
-
-    def count_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text, add_special_tokens=True))
+        prompt: str,
+        options: GenerationOptions | None = None,
+    ) -> GenerationResult:
+        ...
 
 
 _CITATION = re.compile(r"\[(S\d+)\]")
@@ -139,6 +68,8 @@ class LocalTransformerGenerator:
         runtime = self._get_runtime()
         try:
             input_tokens = runtime.count_tokens(prompt)
+        except LocalGenerationError:
+            raise
         except Exception as exc:
             raise RuntimeError(
                 f"Unable to measure local model input tokens: {exc}"
@@ -157,19 +88,27 @@ class LocalTransformerGenerator:
             )
         try:
             generation_start = time.perf_counter()
-            answer = runtime.generate(
+            generation_result = runtime.generate(
                 prompt,
-                max_new_tokens=self.config.max_new_tokens,
-                temperature=self.config.temperature,
+                GenerationOptions(
+                    max_new_tokens=self.config.max_new_tokens,
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                ),
             )
             generation_seconds = time.perf_counter() - generation_start
+        except LocalGenerationError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"Local Transformer generation failed: {exc}") from exc
+        answer = generation_result.text
         if not isinstance(answer, str) or not answer.strip():
             raise RuntimeError("Local Transformer returned an empty answer")
         answer = answer.strip()
         try:
             generated_tokens = runtime.count_tokens(answer)
+        except LocalGenerationError:
+            raise
         except Exception as exc:
             raise RuntimeError(
                 f"Unable to count generated local model tokens: {exc}"
@@ -275,10 +214,17 @@ class LocalTransformerGenerator:
 
     def _get_runtime(self) -> TextRuntime:
         if self._runtime is None:
-            self._runtime = _TransformersRuntime(
-                self.config.model_path,
-                self.config.device,
-                self.config.quantization,
+            self._runtime = LocalTransformerClient(
+                LocalTransformerConfig(
+                    model_path=self.config.model_path,
+                    runtime=self.config.runtime,
+                    device=self.config.device,
+                    quantization=self.config.quantization,
+                    context_length=self.config.context_length,
+                    max_new_tokens=self.config.max_new_tokens,
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                )
             )
         return self._runtime
 

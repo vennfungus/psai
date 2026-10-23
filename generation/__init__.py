@@ -1,4 +1,4 @@
-"""Strictly local Transformer generation interfaces."""
+"""Grounded local generation interfaces."""
 
 from .config import LocalGenerationConfig
 from .local_transformer import LocalTransformerGenerator

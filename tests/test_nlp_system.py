@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from generation import LocalGenerationConfig, LocalTransformerGenerator
+from llm import GenerationOptions, GenerationResult
 from nlp_system.answerer import HybridAnswerer
 from nlp_system.config import NLPConfig
 from nlp_system.pipeline import _build_parser, _parse_filters
@@ -81,12 +82,10 @@ class MockTextRuntime:
     def generate(
         self,
         prompt: str,
-        *,
-        max_new_tokens: int,
-        temperature: float,
-    ) -> str:
+        options: GenerationOptions | None = None,
+    ) -> GenerationResult:
         self.last_prompt = prompt
-        return self.response
+        return GenerationResult(self.response, {})
 
 
 class HybridAnswererTests(unittest.TestCase):

@@ -404,12 +404,16 @@ or source documents may be inaccurate. This phase does not add conversation memo
 
 ## Optional local Transformer generation
 
-`generation/` is an optional, strictly local Hugging Face Transformers adapter.
-It loads a causal instruction model only when `--generate` or `--planning` is
-used, requires a local model directory, passes `local_files_only=True`, and
-does not fall back to a hosted provider. No generator weights are included or
-cached in the inspected environment. The default query-answer path remains
-extractive and needs no generative model.
+`llm/` provides the reusable local text-generation interface and a single
+Hugging Face Transformers runtime. `generation/` adapts that client for
+evidence-grounded answers. The model is loaded lazily on the first generation
+request and reused; loading uses `local_files_only=True` and never falls back
+to a hosted provider. No generator weights are included or cached in the
+inspected environment. The default query-answer path remains extractive and
+needs no generative model. The runtime supports causal language models
+available through the installed Transformers `AutoModelForCausalLM` classes;
+custom model code requiring `trust_remote_code=True` is intentionally not
+enabled.
 
 Provision model weights as a separate, deliberate operation (this is the only
 step below that needs model-hub access). Choose a model compatible with your
@@ -420,7 +424,15 @@ python -m pip install -U huggingface_hub
 hf download <publisher>/<causal-instruct-model> --local-dir models\<model-folder>
 ```
 
-Then run inference from the local folder:
+The minimum configuration is a local model directory. The client chooses an
+available device with `device="auto"` by default; explicitly select `cpu`,
+`cuda`, or `mps` if needed. Context length and generation limits can be
+configured per client and per request. Dynamic INT8 quantisation is CPU-only;
+its performance and output quality depend on the model and hardware and have
+not been benchmarked here. Large models may exceed available system or GPU
+memory, and CPU inference may be slow.
+
+Run the existing grounded inference CLI from the local folder:
 
 ```powershell
 python -m nlp_system.pipeline --question "Explain the project dependencies." --top-k 5 --generate --local-model-path models\<model-folder> --generation-device cpu --context-length 4096 --max-new-tokens 256
@@ -448,6 +460,15 @@ retrieval and generation load only local model files:
 $env:HF_HUB_OFFLINE = "1"
 $env:TRANSFORMERS_OFFLINE = "1"
 ```
+
+The standalone client can also be called directly:
+
+```powershell
+python -c "from llm import LocalTransformerClient, LocalTransformerConfig; client=LocalTransformerClient(LocalTransformerConfig(r'models\<model-folder>')); result=client.generate('Write one short greeting.'); print(result.text); print(dict(result.metadata))"
+```
+
+The model weights must already exist at that path; the client never downloads
+them automatically.
 
 ## Project-plan validation and scheduling
 
@@ -525,6 +546,19 @@ they do not download model weights.
 NLP system, extraction, planning, generation and evaluation tests use local
 fixtures and mocked model/runtime interfaces. No generative model download,
 network access, or paid provider call is required by the normal test suite.
+Run the Local Transformer Runtime unit tests without network access:
+
+```powershell
+python -m unittest tests.test_llm -v
+```
+
+Optional integration test for a model provisioned separately:
+
+```powershell
+$env:PSAI_LOCAL_MODEL_PATH = "models\<model-folder>"
+python -m unittest tests.test_llm_local_integration -v
+```
+
 An optional integration test uses an already provisioned local model:
 
 ```powershell

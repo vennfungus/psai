@@ -86,8 +86,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--generation-device",
-        choices=("cpu", "cuda", "mps"),
-        default="cpu",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
     )
     parser.add_argument("--context-length", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=512)
